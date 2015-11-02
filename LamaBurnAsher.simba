@@ -1,0 +1,397 @@
+program LamaBurnAsher;
+{$DEFINE SRLCOMPATIBILITY}
+{$i srl-6/srl.simba}
+{$i srl-6/lib/misc/srlplayerform.simba}
+{$i ogLib/lib/core/core.simba}
+
+const
+
+{ Script Info }
+  SCRIPT = 'LamaBurnAsher v';
+  VERSION = 1.0;
+
+{ Player Form }
+  P_LOGS_COUNT = 0;
+  P_LOG_TYPE = -1;
+  P_BANK_PRESET = 1;
+
+{ Burn XPs }
+  LOG_NORMAL = 40;
+  LOG_OAK    = 60;
+  LOG_WILLOW = 90;
+  LOG_MAPLE  = 142.5;
+  LOG_YEW    = 202.5;
+  LOG_MAGIC  = 303.8;
+
+// Global Variables
+var
+  ClientCenter: TPoint;
+  BankerModels: glModelArray;
+  AshesModels, LitLogsModels: glModelArray;
+  CanBurnLogs, CanTakeAshes: tCountDown;
+  LogsTextures, AshesTextures: glTextureArray;
+
+  LogsBurned, AshesCollected: integer;
+  ProfitMade: integer;
+  XPGained: extended;
+  ScriptTime: TTimeMarker;
+
+  ProggyBitmap: integer;
+
+procedure initPlayerForm();
+begin
+  with playerForm do
+  begin
+    name := SCRIPT + ' ' + toStr(VERSION);
+    scriptHelpThread := '';
+
+    editBoxLabels := ['Logs to Burn', 'World'];
+    editBoxDefaults := ['0','0'];
+    editBoxHints := ['Exact number of clay to humidify', 'What world to log on to'];
+
+    checkBoxLabels := ['Collect Ashes', 'Text Proggy', 'SMART Proggy', 'Debug OGL/SRL'];
+    checkBoxDefaults := ['true', 'true', 'true', 'false'];
+    checkBoxHints := ['Collect ashes from burned out fires?', 'Output the progress report to the debug box?', 'Paint proggy onto SMART?', 'Debug OGL/SRL stuff?'];
+
+    comboBoxLabels := ['Bank Preset', 'Log Type'];
+    comboBoxDefaults := ['1', 'Normal'];
+    comboBoxHints := ['Which bank preset to use', 'What kind of logs are you going to burn?'];
+
+    setLength(comboBoxItems, length(comboBoxLabels));
+    comboBoxItems[0] := ['1', '2'];
+    comboBoxItems[1] := ['Normal', 'Oak', 'Willow', 'Maple', 'Yew', 'Magic'];
+  end;
+end;
+
+procedure declarePlayers();
+var
+  i: integer;
+begin
+  players.setup(playerForm.playerNames, playerForm.playerFile);
+  currentPlayer := 0;
+
+  for i := 0 to high(players) do
+    with players[i] do
+    begin
+      integers[P_LOGS_COUNT] := strToInt(playerForm.players[i].settings[0]); // Loads to Do
+      world := strToInt(playerForm.players[i].settings[1]);                  // World
+
+      booleans[0] := strToBool(playerForm.players[i].settings[2]); // Collect ashes?
+      booleans[1] := strToBool(playerForm.players[i].settings[3]); // Proggy on?
+      booleans[2] := strToBool(playerForm.players[i].settings[4]); // SMART Proggy on?
+      booleans[3] := strToBool(playerForm.players[i].settings[5]); // Debug SRL/OGL
+
+      case playerForm.players[i].settings[6] of                    // Bank Preset
+        '1': integers[P_BANK_PRESET] := BANK_BUTTON_PRESET_1;
+        '2': integers[P_BANK_PRESET] := BANK_BUTTON_PRESET_2;
+      end;
+
+      strings[P_LOG_TYPE] := playerForm.players[i].settings[7];
+    end;
+end;
+
+procedure getUpdate();
+var
+  newFile: Integer;
+  newRev: Extended;
+begin
+  newRev := strToFloat(getPage('http://tomstewart.net/proxy.php?url=https://raw.githubusercontent.com/sneakyLama/LamaScripts/master/lamaburnasher/version.txt'));
+
+  if newRev > VERSION then
+  begin
+    writeln('Updating from revision ' + toStr(VERSION) + ' to revision ' + toStr(newRev));
+    newFile := rewriteFile(scriptPath + 'LamaBurnAsher v' + toStr(newRev) + '.simba', false);
+    writeFileString(newFile, getPage('http://tomstewart.net/proxy.php?url=https://raw.githubusercontent.com/sneakyLama/LamaScripts/master/lamaburnasher/LamaBurnAsher.simba'));
+    closeFile(newFile);
+    writeln('Please open the new file.');
+    terminateScript();
+  end
+  else
+    writeln('Script is up-to-date.');
+end;
+
+function getGEPrice(itemString: String): integer;
+var
+  wikiaPage, priceString: string;
+
+begin
+  wikiaPage := getPage('http://runescape.wikia.com/wiki/Exchange:' + itemString);
+  priceString := between('GEPrice">', '</span>', wikiaPage);
+  result := strToIntDef(extractFromStr(priceString, numbers), -1);
+  if (players[currentPlayer].booleans[2]) then
+    writeLn('-- ' + itemString + ' price: ' + toStr(result));
+end;
+
+function perHour(amt, time: integer): integer;  // Credits: Coh3n
+begin
+  if (amt = -1) then
+  begin
+    result := -1;
+    exit;
+  end;
+  try
+    result := round((amt * 60) / (time / 60000));
+  except
+  end;
+end;
+
+function findNormalRandoms: boolean;
+begin
+  result := exitTreasure or claimTicket;
+end;
+
+// Credits: Ross
+procedure waitFlag;
+begin
+  wait(250);
+  while (not ogl.getTextures(1275).isEmpty()) do
+    wait(500);
+end;
+
+// Credits: Ross
+function tileWalk(randomization: integer; offSetTiles: TPointArray): boolean;
+var
+  rx, ry, i: integer;
+begin
+  for i:=0 to high(offSetTiles) do
+  begin
+    rx := randomrange(-(randomization), randomization);
+    ry := randomrange(-(randomization), randomization);
+    mouse.click(minimap.getScreenPosition(minimap.getLocalPosition().adjustposition(offsetTiles[i].x+rx, offsetTiles[i].y+ry)), 1);
+    if ((offSetTiles[i].y > 20) or (offSetTiles[i].y < -20)) or ((offSetTiles[i].x > 15) or (offSetTiles[i].x < -15)) then
+      wait(3500)
+    else
+      wait(1000);
+    waitflag;
+  end;
+end;
+
+// Credits: Ross
+function iconWalk(randomization: integer; icon: glTextureArray; offSetTiles: TPoint): boolean;
+var
+  rx, ry :integer;
+begin
+  rx := randomrange(-(randomization), randomization);
+  ry := randomrange(-(randomization), randomization);
+  if icon.isEmpty() then
+    result:=false
+  else
+  begin
+  mouse.click(minimap.getScreenPosition(minimap.getLocalPosition(icon[0]).adjustposition(offsetTiles.x+rx, offsetTiles.y+ry)), 1);
+    if ((offSetTiles.y > 20) or (offSetTiles.y < -20)) or ((offSetTiles.x > 15) or (offSetTiles.x < -15)) then
+      wait(3500)
+    else
+      wait(1000);
+    waitflag;
+    result:=true;
+  end;
+  exit(result);
+end;
+
+procedure bankStuff();
+var
+  clickPoint: TPoint;
+begin
+  clickPoint := ClientCenter.closest(BankerModels)[0].randomizePointEllipse(20);
+
+  mouse.rightClickOption(clickPoint, 'Bank');
+
+  if bankScreen.isOpen(2000) then
+    bank.clickPreset(players[currentPlayer].integers[P_BANK_PRESET]);
+
+  if (not bankScreen.isOpen(2000)) then
+end;
+
+// Credits: Ross
+function walkToBank(): boolean;
+begin
+  if (not iconWalk(1, ogl.getTextures([45052], [4668991]), [5, -1])) then
+    exit(false);
+
+  bankStuff();
+end;
+
+function walkOutSide(): boolean;  // note to self, would it be easier to SPS?
+begin
+  // Walk from bank to path outside of bank
+  //if (not tileWalk(3, [[]])) then
+  //  exit(false);
+end;
+
+procedure burnLogs();
+var
+  clickPoint: TPoint;
+begin
+  clickPoint := mouse.getPoint().closest(LogsTextures)[0].randomizePointEllipse(36);
+
+  mouse.rightClickOption(clickPoint, 'Light');
+  CanBurnLogs.setTime(random(1250, 2000)); // Wait until current log is lit, find fire model?
+
+  LogsBurned := LogsBurned + 1;
+end;
+
+procedure collectAshes();
+var
+  clickPoint: TPoint;
+begin
+  clickPoint := ClientCenter.closest(AshesModels)[0].randomizePointEllipse(15);
+
+  mouse.rightClickOption(clickPoint, 'Take Ashes');
+  CanTakeAshes.setTime(random(1000, 5000));
+
+  AshesCollected := AshesCollected + 1;
+end;
+
+procedure doNothing();
+begin
+  wait(100);
+end;
+
+procedure resetCharacter(); // If character gets out of wack and cant find bank
+begin
+  minimap.clickCompass();
+  mainScreen.setAngle(MS_ANGLE_HIGH);
+
+  minimap.clickHomeTeleport();
+  if lodestoneScreen.isOpen(2250) then
+    lodestone.clickTeleport('seersvillage');
+  if (not lodestone.isTeleporting()) then
+    // tileWalk(2, [[-10, 5], [-15, 0], [-10, -3]]); // near eastern-most point on minimap
+end;
+
+function calcXP(): double;
+var
+  logType: integer;
+begin
+  case lowerCase(players[currentPlayer].strings[P_LOG_TYPE]) of
+    'normal': logType := LOG_NORMAL;
+    'oak': logType := LOG_OAK;
+    'willow': logType := LOG_WILLOw;
+    'maple': logType := LOG_MAPLE;
+    'yew': logType := LOG_YEW;
+    'magic': logType := LOG_MAGIC;
+  end;
+  result := logType * LogsBurned;
+end;
+
+function calcProfit(): integer;
+begin
+  case lowerCase(players[currentPlayer].strings[P_LOG_TYPE]) of
+    'normal': result := getGePrice('Logs');
+    else result := getGePrice(players[currentPlayer].strings[P_LOG_TYPE] + '_logs');
+  end;
+end;
+
+procedure proggy();
+var
+  logsBurnedHrString: string;
+  ashCollectedHrString: string;
+begin
+  clearDebug();
+
+  XPGained := CalcXP(players[currentPlayer].strings[P_LOG_TYPE]);
+  ProfitMade := CalcProfit();
+
+  logsBurnedHrString := (groupDigits(perHour(LogsBurned, ScriptTime.getTime()), ','));
+  ashCollectedHrString := (groupDigits(perHour(AshesCollected, ScriptTime.getTime()), ','));
+
+  writeLn('|=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=|');
+  writeLn(padR('|          ' + SCRIPT + toStr(VERSION), 40) + '|');
+  writeLn('|=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=|');
+  writeLn(padR('| Time Running: ' + msToTime(ScriptTime.getTime(), TIME_ABBREV), 40) + '|');
+  writeLn(padR('| Logs Burned : ' + toStr(LogsBurned) + ' (' + logsBurnedHrString + '/hr)', 40) + '|');
+  writeLn(padR('| XP Gained   : ' + groupDigits(XPGained, ',') + ' (' + groupDigits(perHour(XPGained, ScriptTime.getTime()), ',') + ' hr)', 40) + '|');
+  if players[currentPlayer].booleans[0] then
+    writeLn(padR('| Ash Count   : ' + toStr(AshesCollected) + ' (' + ashCollectedHrString + '/hr)', 40) + '|');
+  writeLn(padR('| Profit Made : ' + groupDigits(ProfitMade, ',') + ' (' + groupDigits(perHour(ProfitMade, ScriptTime.getTime()), ',') + ' hr)', 40) + '|');
+  writeLn('|_______________________________________|');
+
+  {if players[currentPlayer].booleans[2] then // SMART proggy
+  begin
+    smartImage.drawBitmap(ProggyBitmap, point(4, 424));
+    smartImage.drawText((msToTime(ScriptTime.getTime(), TIME_ABBREV)), Point(433, 445), UpCharsEx, false, clWhite); // Draw time running
+    smartImage.drawText(groupDigits(ClayCount, ',') + ' humidified', Point(433, 487), UpCharsEx, false, 1268443); // Draw how many loads completed
+    smartImage.drawText(groupDigits(ProfitMade, ',') + ' (' + (groupDigits(perHour(ProfitMade, ScriptTime.getTime()), ',')) + ' hr)', point(433, 528), UpCharsEx, false, clYellow);
+  end; }
+end;
+
+procedure setup();
+begin
+  clearDebug();
+
+  initPlayerForm();
+  runPlayerForm();
+  declarePlayers();
+
+  ogl.setup(800, 600);
+  ClientCenter := ogl.getClientMidPoint();
+
+  if (players[currentPlayer].booleans[3]) then
+  begin
+    ogl.setDebugMode('models');
+    disableSRLDebug := false
+  end
+  else
+  begin
+    ogl.setDebugMode('none');
+    disableSRLDebug := true;
+  end;
+
+  ProggyBitmap := BitmapFromString(1, 1, 'asdasdbcbcsdf1'); // Use tools -> bitmap conversion for actual proggy
+
+  BankerModels := ogl.getModels(2083337462); // Get banker models
+  AshesModels := ogl.getModels(1292711804); // Get ashes models
+
+  LogsTextures := ogl.getTextures(116280);  // Get logs textures
+  AshesTextures := ogl.getTextures(48705); // Get ashes textures
+
+  LogsBurned := 0;
+  AshesCollected := 0;
+  ProfitMade := 0;
+
+  clearDebug();
+end;
+
+procedure mainLoop();
+var
+  reaction: procedure() = @doNothing;
+begin
+  if not isLoggedIn then
+  begin
+    if not players[currentPlayer].login then
+      terminateScript();
+    writeLn('Just logged in ... waiting a moment ...');
+    wait(randomRange(1500, 3500));
+  end;
+
+  minimap.clickCompass();
+  mainScreen.setAngle(MS_ANGLE_HIGH);
+  writeLn('Setting zoom level ... this may take a second ...');
+  mainScreen.setZoom(true);
+
+  findNormalRandoms();
+
+  ScriptTime.start();
+  repeat
+    if (not walkToBank()) then
+      resetCharacter();
+
+    repeat
+      if (not LogsTextures.isEmpty()) and CanBurnLogs.isFinished() then
+        reaction := @burnLogs
+      else if (not AshesModels.isEmpty()) and CanTakeAshes.isFinished() then
+        reaction := @collectAshes;
+
+      reaction();
+    until (AshesModels.isEmpty() and tabBackpack.isFull());
+
+    if players[currentPlayer].booleans[1] then
+      proggy();
+  until LogsBurned >= players[currentPlayer].integers[P_LOGS_COUNT];
+end;
+
+begin
+  //getUpdate();
+  setup();
+  mainLoop();
+end.
