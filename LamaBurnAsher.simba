@@ -91,7 +91,7 @@ begin
     end;
 end;
 
-procedure getUpdate();
+procedure getUpdate(); { CREDITS: The Mayor }
 var
   newFile: Integer;
   newRev: Extended;
@@ -111,7 +111,7 @@ begin
     writeln('Script is up-to-date.');
 end;
 
-function getGEPrice(itemString: String): integer;
+function getGEPrice(itemString: String): integer; { CREDITS: The Mayor }
 var
   wikiaPage, priceString: string;
 
@@ -258,6 +258,11 @@ begin
   result := ((getGePrice('Ashes') - logCost) * AshesCollected) - (logCost * LogsBurned);
 end;
 
+procedure freeImages();
+begin
+  freeBitmaps([ProggyBitmap]);
+end;
+
 procedure proggy();
 var
   logsBurnedHrString: string;
@@ -315,6 +320,7 @@ begin
   SPSanyangle := false;
 
   ProggyBitmap := BitmapFromString(1, 1, 'asdasdbcbcsdf1'); // Use tools -> bitmap conversion for actual proggy
+  addOnTerminate('freeImages');
 
   BankerModels := ogl.getModels(2083337462); // Get banker models
   AshesModels := ogl.getModels(1292711804); // Get ashes models
@@ -351,7 +357,7 @@ begin
   ScriptTime.start();
   repeat
     if (not doBanking()) then
-      resetCharacter()
+      resetCharacter();
 
     repeat
       if (not LogsTextures.isEmpty()) and CanBurnLogs.isFinished() then
@@ -365,6 +371,11 @@ begin
     if players[currentPlayer].booleans[1] then
       proggy();
   until LogsBurned >= players[currentPlayer].integers[P_LOGS_COUNT];
+
+  proggy();
+  writeLn('Goal met ... exiting to lobby ...');
+  players[currentPlayer].exitToLobby();
+  terminateScript();
 end;
 
 begin
